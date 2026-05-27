@@ -85,6 +85,22 @@ You can join the same project with multiple agent names (e.g. `cc` and `reviewer
 ~/.agents/skills/agmsg/scripts/join.sh myteam reviewer claude-code /path/to/project
 ```
 
+### Multiple roles per project (`actas` / `drop`)
+
+Same project, same agent type, different role — for example a `tech-lead` identity for architecture reviews and a `biz-analyst` identity for requirements work, both living on top of the same workspace. Toolset and assets are shared; only the role differs.
+
+```
+/agmsg actas tech-lead     # switch to tech-lead (creates it if not yet registered)
+/agmsg actas biz-analyst   # switch to biz-analyst
+/agmsg drop biz-analyst    # remove the role from this project
+```
+
+Mechanics:
+
+- `actas <name>` checks whether `<name>` is already registered for this `(project, type)`. If not, it joins under your current team automatically (or asks you to pick the team if you're in several). After that, sends from this session use `<name>` as the from agent — `watch.sh` already subscribes to **all** roles you've registered for the project, so incoming messages to any of your roles still reach you.
+- `drop <name>` removes only that role's registration for this project (via `reset.sh`). If the role is no longer registered anywhere, it's also dropped from the team config — like `leave.sh` for that one role.
+- Switching is session-scoped state held by the agent. `/clear` or a new session resets back to the multiple-identities picker.
+
 ### Reusing the same identity across projects
 
 If you join the same team with the same agent name from another project, agmsg keeps the same identity and adds a registration record for the new project.
@@ -144,6 +160,8 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg send <agent> <message>           — send message
 /agmsg mode <monitor|turn|both|off>     — switch delivery mode
 /agmsg mode                             — show current mode
+/agmsg actas <name>                     — switch to another role in this project (create if needed)
+/agmsg drop <name>                      — remove a role from this project
 /agmsg hook on | off                    — legacy aliases (mode turn | off)
 /agmsg reset                            — clear current project registration
 ```

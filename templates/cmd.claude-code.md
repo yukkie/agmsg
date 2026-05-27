@@ -40,6 +40,8 @@ Four possible outputs:
   > - `/__SKILL_NAME__ team` — list team members
   > - `/__SKILL_NAME__ history` — message history
   > - `/__SKILL_NAME__ mode <monitor|turn|both|off>` — switch delivery mode
+  > - `/__SKILL_NAME__ actas <name>` — switch to another role in this project (creates if needed)
+  > - `/__SKILL_NAME__ drop <name>` — remove a role from this project
 
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick a delivery mode using exactly this prompt:
 
@@ -99,6 +101,20 @@ If argument starts with "send" (e.g. "send misaki check the server"):
 1. Parse target agent and message from the arguments
 2. Determine which team the target agent belongs to, then run:
    `~/.agents/skills/__SKILL_NAME__/scripts/send.sh $TEAM $AGENT <to_agent> "<message>"`
+
+If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
+1. Parse the new role name.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/identities.sh "$(pwd)" claude-code` to see whether the role is already registered for this (project, type).
+3. If the name does not appear in the output, you need to join under the existing team. Read TEAMS from the in-session whoami state (it may be a single team or comma-separated). For a single team, run `~/.agents/skills/__SKILL_NAME__/scripts/join.sh <team> <name> claude-code "$(pwd)"`. For multiple teams, ask the user which team to join the new role into, then run join.sh for that team.
+4. Set the session's active FROM to `<name>` — use `<name>` as the `from_agent` in every `send.sh` call for the rest of this session (or until another `actas`). Keep this in memory; no state file is written.
+5. Tell the user: "Now acting as `<name>`. Sends will use `<name>` as the from agent."
+6. Then run inbox check.
+
+If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
+1. Parse the role name.
+2. Run `~/.agents/skills/__SKILL_NAME__/scripts/reset.sh "$(pwd)" claude-code <name>` to remove only that role's registration for this project. If the role has no other registrations left, reset.sh also drops it from the team config.
+3. If the session's active FROM was `<name>`, clear that state and fall back to whichever identity whoami now reports (re-run whoami if uncertain).
+4. Tell the user: "Dropped role `<name>` from this project."
 
 If argument is "mode" (no further args):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh status claude-code "$(pwd)"`
