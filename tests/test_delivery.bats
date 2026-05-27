@@ -470,3 +470,46 @@ JSON
 
   unset CLAUDE_CODE_SESSION_ID
 }
+
+# --- watch.sh exclusive role filter ---
+
+@test "watch.sh restricts subscription to active_name when 4th arg is given" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{
+  "name":"myteam",
+  "agents":{
+    "alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]},
+    "bob":  {"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}
+  }
+}
+JSON
+  # Insert two messages, one for each agent.
+  DB="$TEST_SKILL_DIR/db/messages.db"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'alice', 'for-alice');"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'bob', 'for-bob');"
+
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code bob > /tmp/agmsg-as-bob 2>&1 &
+  local pid=$!
+  # High-water-mark = MAX(id) at startup, so prior messages aren't replayed.
+  # Insert NEW messages and wait for several poll iterations.
+  sleep 1
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'alice', 'new-for-alice');"
+  sqlite3 "$DB" "INSERT INTO messages (team, from_agent, to_agent, body) VALUES ('myteam', 'system', 'bob', 'new-for-bob');"
+  sleep 3
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null || true
+
+  grep -q "new-for-bob"   /tmp/agmsg-as-bob
+  ! grep -q "new-for-alice" /tmp/agmsg-as-bob
+  rm -f /tmp/agmsg-as-bob
+}
+
+@test "watch.sh exits when active_name is not registered" {
+  mkdir -p "$TEST_SKILL_DIR/teams/myteam"
+  cat > "$TEST_SKILL_DIR/teams/myteam/config.json" <<JSON
+{"name":"myteam","agents":{"alice":{"registrations":[{"type":"claude-code","project":"$TEST_PROJECT"}]}}}
+JSON
+  run bash "$SCRIPTS/watch.sh" t-sid "$TEST_PROJECT" claude-code nobody
+  [[ "$output" =~ "no registration for agent 'nobody'" ]]
+}
