@@ -5,8 +5,9 @@ setup_test_env() {
   export TEST_SKILL_DIR="$(mktemp -d)"
   mkdir -p "$TEST_SKILL_DIR"/{scripts,db,teams}
 
-  # Copy all scripts to isolated skill dir
-  cp "$BATS_TEST_DIRNAME"/../scripts/*.sh "$TEST_SKILL_DIR/scripts/"
+  # Copy all scripts to isolated skill dir. Recursive so nested helper dirs
+  # (scripts/lib/) come along without enumerating files.
+  cp -R "$BATS_TEST_DIRNAME"/../scripts/. "$TEST_SKILL_DIR/scripts/"
   chmod +x "$TEST_SKILL_DIR/scripts/"*.sh
 
   # Initialize DB
