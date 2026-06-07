@@ -119,8 +119,11 @@ for team in "${TEAM_LIST[@]}"; do
     other:*) continue ;;
   esac
 
-  RESULT=$(sqlite3 "$DB" "
-    SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+  # Select discrete columns with -separator so 0x1F is emitted as a real byte —
+  # the Windows sqlite3.exe CLI renders an embedded char(31) as the literal "^_",
+  # which breaks the IFS split below (see watch.sh for the same pattern).
+  RESULT=$(sqlite3 -separator $'\x1f' "$DB" "
+    SELECT from_agent, replace(replace(body, char(10), '\n'), char(9), '\t'), created_at
     FROM messages WHERE team='$team' AND to_agent='$AGENT' AND read_at IS NULL
     ORDER BY created_at ASC;
   ")
@@ -128,6 +131,7 @@ for team in "${TEAM_LIST[@]}"; do
     COUNT=$(echo "$RESULT" | wc -l | tr -d ' ')
     OUTPUT+="$COUNT new message(s) in $team:"$'\n'
     while IFS=$'\x1f' read -r from body ts; do
+      ts="${ts%$'\r'}"  # strip trailing CR from Windows sqlite3.exe CRLF line endings
       OUTPUT+="  [$ts] $from: $body"$'\n'
     done <<< "$RESULT"
     OUTPUT+=$'\n'

@@ -23,9 +23,12 @@ else
   WHERE="WHERE team='$TEAM'"
 fi
 
-# Escape newlines/tabs in body, use unit separator between fields
-RESULT=$(sqlite3 "$DB" "
-  SELECT from_agent || char(31) || to_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at || char(31) || CASE WHEN read_at IS NULL THEN '●' ELSE '○' END
+# Escape newlines/tabs in body, use unit separator between fields. Select
+# discrete columns with -separator so 0x1F is emitted as a real byte — the
+# Windows sqlite3.exe CLI renders an embedded char(31) as the literal "^_",
+# which breaks the IFS split below (see watch.sh for the same pattern).
+RESULT=$(sqlite3 -separator $'\x1f' "$DB" "
+  SELECT from_agent, to_agent, replace(replace(body, char(10), '\n'), char(9), '\t'), created_at, CASE WHEN read_at IS NULL THEN '●' ELSE '○' END
   FROM messages $WHERE ORDER BY created_at DESC LIMIT $LIMIT;
 ")
 
@@ -37,5 +40,6 @@ fi
 # Reverse order (oldest first) and display
 REVERSED=$(echo "$RESULT" | tail -r 2>/dev/null || echo "$RESULT" | tac 2>/dev/null || echo "$RESULT" | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--)print a[i]}')
 while IFS=$'\x1f' read -r from to body ts status; do
+  status="${status%$'\r'}"  # strip trailing CR from Windows sqlite3.exe CRLF line endings
   echo "  $status [$ts] $from → $to: $body"
 done <<< "$REVERSED"

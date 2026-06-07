@@ -22,9 +22,13 @@ if [ ! -f "$DB" ]; then
   exit 0
 fi
 
-# Get unread messages — escape newlines/tabs in body to keep one record per line
-UNREAD=$(sqlite3 "$DB" "
-  SELECT from_agent || char(31) || replace(replace(body, char(10), '\n'), char(9), '\t') || char(31) || created_at
+# Get unread messages — escape newlines/tabs in body to keep one record per line.
+# Select discrete columns with -separator so the 0x1F field delimiter is emitted
+# as a real byte. Concatenating char(31) into a single column makes the Windows
+# sqlite3.exe CLI render it as the literal caret notation "^_", which breaks the
+# IFS split below (see watch.sh for the same pattern).
+UNREAD=$(sqlite3 -separator $'\x1f' "$DB" "
+  SELECT from_agent, replace(replace(body, char(10), '\n'), char(9), '\t'), created_at
   FROM messages WHERE team='$TEAM' AND to_agent='$AGENT' AND read_at IS NULL
   ORDER BY created_at ASC;
 ")
@@ -40,6 +44,7 @@ COUNT=$(echo "$UNREAD" | wc -l | tr -d ' ')
 echo "$COUNT new message(s):"
 echo ""
 while IFS=$'\x1f' read -r from body ts; do
+  ts="${ts%$'\r'}"  # strip trailing CR from Windows sqlite3.exe CRLF line endings
   echo "  [$ts] $from: $body"
 done <<< "$UNREAD"
 echo ""
