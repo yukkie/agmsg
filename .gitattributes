@@ -1,0 +1,4 @@
+# Shell scripts must stay LF even on Windows checkouts: a CRLF rewrite breaks
+# `#!/usr/bin/env bash` shebang parsing and here-doc/`read` handling.
+* text=auto eol=lf
+*.sh text eol=lf
