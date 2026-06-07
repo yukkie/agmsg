@@ -49,6 +49,25 @@ The **command name** determines:
 
 After install, **restart your agent** (Claude Code / Codex / Gemini CLI / Antigravity) so it picks up the new skill.
 
+### Windows (Git Bash)
+
+agmsg ships as bash scripts, so on Windows run it under **Git Bash** (bundled with [Git for Windows](https://git-scm.com/download/win)) rather than PowerShell or `cmd`. The scripts themselves need no changes — the only missing dependency is `sqlite3`, which Git for Windows does not bundle.
+
+```bash
+# 1. Install sqlite3 (PowerShell)
+winget install --id SQLite.SQLite -e
+
+# 2. winget does not add sqlite3 to the Git Bash PATH, so add it yourself.
+#    Append to ~/.bashrc (adjust the version-suffixed folder name if it differs):
+echo 'export PATH="$LOCALAPPDATA/Microsoft/WinGet/Packages/SQLite.SQLite_Microsoft.Winget.Source_8wekyb3d8bbwe:$PATH"' >> ~/.bashrc
+
+# 3. Open a fresh Git Bash and verify, then install as usual
+sqlite3 --version
+./install.sh
+```
+
+Everything else works identically to macOS/Linux: install, join, send, and inbox were all verified on Git Bash with this setup.
+
 ## Join a Team
 
 Agents join teams by **identity**: `(agent name, team)`. Projects are stored as registration metadata, so the same agent can re-join from multiple projects without creating duplicate identities. The easiest way:
@@ -282,7 +301,7 @@ bats tests/    # requires bats-core: brew install bats-core
 
 - **Storage**: Single SQLite file with WAL mode
 - **Concurrency**: Multiple readers + 1 writer, no conflicts
-- **Dependencies**: bash, sqlite3 (no python3 required)
+- **Dependencies**: bash, sqlite3 (no python3 required) — on Windows, run under Git Bash (see [Windows (Git Bash)](#windows-git-bash))
 - **Auto detection**: Stop hook checks inbox after each response (60s cooldown)
 - **No daemon**: Direct filesystem access
 - **No network**: Everything local
