@@ -45,43 +45,48 @@ resolve_hooks_file() {
   esac
 }
 
-read_settings_escaped() {
-  if [ -f "$1" ]; then
-    sed "s/'/''/g" "$1"
-  else
-    echo '{}'
-  fi
-}
-
-# Strip any agmsg-owned hook entries from <event> in settings JSON. An entry
-# is "agmsg-owned" when one of its inner hooks references a path under our
-# skill directory. Result: the entire <event> array minus those entries
-# (or .hooks.<event> deleted if the array becomes empty).
-strip_agmsg_event() {
-  local settings_esc="$1"
+# Strip any agmsg-owned hook entries from <event> in the JSON at <path>. An
+# entry is "agmsg-owned" when one of its inner hooks references a path under
+# our skill directory. Result is written back to <path> atomically.
+#
+# Reads the settings via sqlite3's readfile() rather than interpolating the
+# file's contents into the SQL string. The old in-memory chain embedded the
+# settings blob 6× into a single sqlite3 argv element; on Linux that hits
+# the per-arg MAX_ARG_STRLEN cap (131072 bytes) once the settings file
+# crosses ~21 KB, so `delivery.sh set` failed with E2BIG (see #95). Using
+# readfile() keeps the file off the argv entirely.
+strip_agmsg_event_file() {
+  local path="$1"
   local event="$2"
-
-  sqlite3 :memory: "
+  local tmp
+  tmp=$(mktemp)
+  if ! sqlite3 :memory: "
+    WITH src AS (SELECT readfile('$path') AS j)
     SELECT CASE
-      WHEN json_extract('$settings_esc', '\$.hooks.$event') IS NULL THEN
-        '$settings_esc'
-      WHEN (SELECT count(*) FROM json_each(json_extract('$settings_esc', '\$.hooks.$event')) AS s
+      WHEN json_extract(src.j, '\$.hooks.$event') IS NULL THEN
+        src.j
+      WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
             WHERE NOT EXISTS (
               SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
               WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
             )) = 0 THEN
-        json_remove('$settings_esc', '\$.hooks.$event')
+        json_remove(src.j, '\$.hooks.$event')
       ELSE
-        json_set('$settings_esc', '\$.hooks.$event',
+        json_set(src.j, '\$.hooks.$event',
           (SELECT json_group_array(json(s.value))
-           FROM json_each(json_extract('$settings_esc', '\$.hooks.$event')) AS s
+           FROM json_each(json_extract(src.j, '\$.hooks.$event')) AS s
            WHERE NOT EXISTS (
              SELECT 1 FROM json_each(json_extract(s.value, '\$.hooks')) AS h
              WHERE instr(json_extract(h.value, '\$.command'), '$SKILL_NAME') > 0
            ))
         )
-    END;
-  "
+    END
+    FROM src;
+  " > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$path"
 }
 
 # Wrap a POSIX shell command so Codex's Windows runner executes it through Git
@@ -95,11 +100,13 @@ windows_wrap() {
 }
 
 # Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}
-# to .hooks.<event>, creating arrays/objects as needed. For Codex agents (pass
-# "codex" as the 4th arg) the entry also carries a "commandWindows" so the hook
-# runs on native Windows; other agent types are unchanged.
-add_event_entry() {
-  local settings_esc="$1"
+# to .hooks.<event> in the JSON at <path>, creating arrays/objects as needed.
+# For Codex agents (pass "codex" as the 4th arg) the entry also carries a
+# "commandWindows" so the hook runs on native Windows; other agent types are
+# unchanged. Writes the result back to <path>. As with strip_agmsg_event_file,
+# the settings are read via readfile() rather than via argv (#95).
+add_event_entry_file() {
+  local path="$1"
   local event="$2"
   local cmd="$3"
   local hook_type="${4:-}"
@@ -114,11 +121,13 @@ add_event_entry() {
   local entry_esc
   entry_esc=$(printf '%s' "$entry" | sed "s/'/''/g")
 
-  sqlite3 :memory: "
+  local tmp
+  tmp=$(mktemp)
+  if ! sqlite3 :memory: "
     WITH base AS (
-      SELECT CASE WHEN json_extract('$settings_esc', '\$.hooks') IS NULL
-                  THEN json_set('$settings_esc', '\$.hooks', json('{}'))
-                  ELSE '$settings_esc' END AS s
+      SELECT CASE WHEN json_extract(readfile('$path'), '\$.hooks') IS NULL
+                  THEN json_set(readfile('$path'), '\$.hooks', json('{}'))
+                  ELSE readfile('$path') END AS s
     )
     SELECT CASE
       WHEN json_extract(s, '\$.hooks.$event') IS NULL THEN
@@ -133,20 +142,34 @@ add_event_entry() {
         )
     END
     FROM base;
-  "
+  " > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$path"
 }
 
-# Drop the entire .hooks object if it ended up empty after stripping.
-prune_empty_hooks() {
-  local s="$1"
-  sqlite3 :memory: "
+# Drop the entire .hooks object if it ended up empty after stripping. Reads
+# and writes <path> via readfile() — see strip_agmsg_event_file for the
+# rationale (#95).
+prune_empty_hooks_file() {
+  local path="$1"
+  local tmp
+  tmp=$(mktemp)
+  if ! sqlite3 :memory: "
+    WITH src AS (SELECT readfile('$path') AS j)
     SELECT CASE
-      WHEN json_extract('$s', '\$.hooks') IS NULL THEN '$s'
-      WHEN (SELECT count(*) FROM json_each(json_extract('$s', '\$.hooks'))) = 0 THEN
-        json_remove('$s', '\$.hooks')
-      ELSE '$s'
-    END;
-  "
+      WHEN json_extract(src.j, '\$.hooks') IS NULL THEN src.j
+      WHEN (SELECT count(*) FROM json_each(json_extract(src.j, '\$.hooks'))) = 0 THEN
+        json_remove(src.j, '\$.hooks')
+      ELSE src.j
+    END
+    FROM src;
+  " > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$path"
 }
 
 apply_settings_copilot() {
@@ -249,47 +272,54 @@ apply_settings() {
   hooks_file=$(resolve_hooks_file "$type" "$project")
   mkdir -p "$(dirname "$hooks_file")"
 
-  local settings_esc
-  settings_esc=$(read_settings_escaped "$hooks_file")
+  # Work on a temp copy so a partially-modified file never replaces the
+  # original until the whole chain succeeds.
+  local tmp_state
+  tmp_state=$(mktemp)
+  if [ -f "$hooks_file" ]; then
+    cp "$hooks_file" "$tmp_state"
+  else
+    printf '{}' > "$tmp_state"
+  fi
 
   # 1) Strip any prior agmsg ownership from SessionStart, SessionEnd, Stop.
-  settings_esc=$(strip_agmsg_event "$settings_esc" "SessionStart" | sed "s/'/''/g")
-  settings_esc=$(strip_agmsg_event "$settings_esc" "SessionEnd"   | sed "s/'/''/g")
-  settings_esc=$(strip_agmsg_event "$settings_esc" "Stop"         | sed "s/'/''/g")
+  strip_agmsg_event_file "$tmp_state" "SessionStart"
+  strip_agmsg_event_file "$tmp_state" "SessionEnd"
+  strip_agmsg_event_file "$tmp_state" "Stop"
 
   # 2) Re-add what this mode wants.
   case "$mode" in
     monitor)
       local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
       local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
-      settings_esc=$(add_event_entry "$settings_esc" "SessionStart" "$ss" "$type" | sed "s/'/''/g")
-      settings_esc=$(add_event_entry "$settings_esc" "SessionEnd"   "$se" "$type" | sed "s/'/''/g")
+      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$type"
+      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$type"
       ;;
     turn)
       local cmd="'$SKILL_DIR/scripts/check-inbox.sh' '$type' '$project'"
-      settings_esc=$(add_event_entry "$settings_esc" "Stop" "$cmd" "$type" | sed "s/'/''/g")
+      add_event_entry_file "$tmp_state" "Stop" "$cmd" "$type"
       ;;
     both)
       local ss="'$SKILL_DIR/scripts/session-start.sh' '$type' '$project'"
       local se="'$SKILL_DIR/scripts/session-end.sh'   '$type' '$project'"
       local st="'$SKILL_DIR/scripts/check-inbox.sh'   '$type' '$project'"
-      settings_esc=$(add_event_entry "$settings_esc" "SessionStart" "$ss" "$type" | sed "s/'/''/g")
-      settings_esc=$(add_event_entry "$settings_esc" "SessionEnd"   "$se" "$type" | sed "s/'/''/g")
-      settings_esc=$(add_event_entry "$settings_esc" "Stop"         "$st" "$type" | sed "s/'/''/g")
+      add_event_entry_file "$tmp_state" "SessionStart" "$ss" "$type"
+      add_event_entry_file "$tmp_state" "SessionEnd"   "$se" "$type"
+      add_event_entry_file "$tmp_state" "Stop"         "$st" "$type"
       ;;
     off)
       : # already stripped
       ;;
     *)
+      rm -f "$tmp_state"
       echo "Unknown mode: $mode (use monitor|turn|both|off)" >&2
       return 1
       ;;
   esac
 
-  settings_esc=$(prune_empty_hooks "$settings_esc")
+  prune_empty_hooks_file "$tmp_state"
 
-  # Unescape for write.
-  printf '%s' "$settings_esc" | sed "s/''/'/g" > "$hooks_file"
+  mv "$tmp_state" "$hooks_file"
 }
 
 emit_monitor_directive() {
@@ -428,14 +458,16 @@ do_status() {
     hooks_file=$(resolve_hooks_file "$TYPE" "$PROJECT")
     if [ -f "$hooks_file" ]; then
       local count
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract('$(read_settings_escaped "$hooks_file")', '\$.hooks.SessionStart'));" 2>/dev/null || echo 0)
+      # readfile() rather than interpolating the file contents into argv —
+      # for large settings (#95) the latter hits MAX_ARG_STRLEN on Linux.
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.SessionStart'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "settings hooks file: $hooks_file"
       echo "  SessionStart entries: $count"
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract('$(read_settings_escaped "$hooks_file")', '\$.hooks.SessionEnd'));" 2>/dev/null || echo 0)
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.SessionEnd'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "  SessionEnd entries:   $count"
-      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract('$(read_settings_escaped "$hooks_file")', '\$.hooks.Stop'));" 2>/dev/null || echo 0)
+      count=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$hooks_file'), '\$.hooks.Stop'));" 2>/dev/null || echo 0)
       case "$count" in ''|*[!0-9]*) count=0 ;; esac
       echo "  Stop entries:         $count"
     fi

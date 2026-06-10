@@ -884,3 +884,104 @@ JSON
   [ -z "$cw" ]
 }
 
+# --- Large settings.local.json: must not trip Linux MAX_ARG_STRLEN (#95) ---
+#
+# Reporter's actual settings was 32,357 bytes. The pre-fix code embedded the
+# whole blob 6x into one sqlite3 argv element inside strip_agmsg_event, so on
+# Linux (MAX_ARG_STRLEN = 131072) anything above ~21 KB triggered E2BIG. The
+# test below uses ~30 KB to stay close to the reporter's size and reliably
+# fail before the fix on Linux. macOS has a much higher per-arg ceiling
+# (kern.argmax ≈ 1 MB) so the pre-fix code can survive 30 KB there — the
+# test still passes on macOS post-fix; the regression guard is meaningful
+# on Linux CI.
+
+@test "delivery set monitor: handles a large settings.local.json without E2BIG (#95)" {
+  mkdir -p "$TEST_PROJECT/.claude"
+  # Build a ~30 KB settings file with a populated permissions.allow list.
+  # 600 entries * ~50 bytes each ≈ 30 KB.
+  {
+    printf '{"permissions":{"allow":['
+    local i
+    for i in $(seq 1 600); do
+      [ "$i" -gt 1 ] && printf ','
+      printf '"Bash(mkdir:/tmp/agmsg-e2big-entry-%04d)"' "$i"
+    done
+    printf ']}}'
+  } > "$(settings_file)"
+  local size
+  size=$(wc -c < "$(settings_file)" | tr -d ' ')
+  [ "$size" -gt 25000 ]
+
+  run bash "$SCRIPTS/delivery.sh" set monitor claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  has_session_start "$(settings_file)"
+
+  # Existing user permissions must be preserved across the rewrite.
+  local first last allow_len
+  first=$(sqlite3 :memory: "SELECT json_extract(readfile('$(settings_file)'), '\$.permissions.allow[0]');")
+  last=$(sqlite3 :memory:  "SELECT json_extract(readfile('$(settings_file)'), '\$.permissions.allow[599]');")
+  allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
+  [ "$first" = "Bash(mkdir:/tmp/agmsg-e2big-entry-0001)" ]
+  [ "$last" = "Bash(mkdir:/tmp/agmsg-e2big-entry-0600)" ]
+  [ "$allow_len" = "600" ]
+}
+
+@test "delivery set both: handles a large settings.local.json across strip+add+prune (#95)" {
+  mkdir -p "$TEST_PROJECT/.claude"
+  {
+    printf '{"permissions":{"allow":['
+    local i
+    for i in $(seq 1 600); do
+      [ "$i" -gt 1 ] && printf ','
+      printf '"Bash(mkdir:/tmp/agmsg-e2big-both-%04d)"' "$i"
+    done
+    printf ']}}'
+  } > "$(settings_file)"
+
+  # `both` exercises three add_event_entry_file calls after three
+  # strip_agmsg_event_file calls — the longest chain in apply_settings.
+  run bash "$SCRIPTS/delivery.sh" set both claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  has_session_start "$(settings_file)"
+  has_check_inbox "$(settings_file)"
+
+  local allow_len
+  allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
+  [ "$allow_len" = "600" ]
+}
+
+@test "delivery set off: idempotent strip on a large settings.local.json (#95)" {
+  mkdir -p "$TEST_PROJECT/.claude"
+  # Pre-populate with both user permissions and an agmsg-owned Stop entry,
+  # then verify `set off` strips only the agmsg entry without choking on
+  # the file size. Build the inflated fixture via sqlite3 (no python3
+  # dependency — agmsg is bash + sqlite3 only).
+  bash "$SCRIPTS/delivery.sh" set turn claude-code "$TEST_PROJECT"
+
+  local allow_json
+  allow_json=$(
+    printf '['
+    local i
+    for i in $(seq 1 600); do
+      [ "$i" -gt 1 ] && printf ','
+      printf '"Bash(mkdir:/tmp/agmsg-e2big-off-%04d)"' "$i"
+    done
+    printf ']'
+  )
+  local inflated
+  inflated=$(sqlite3 :memory: "
+    SELECT json_set(
+      json_set(readfile('$(settings_file)'), '\$.permissions', json('{}')),
+      '\$.permissions.allow', json('$allow_json')
+    );
+  ")
+  printf '%s' "$inflated" > "$(settings_file)"
+
+  run bash "$SCRIPTS/delivery.sh" set off claude-code "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  ! has_check_inbox "$(settings_file)"
+  local allow_len
+  allow_len=$(sqlite3 :memory: "SELECT json_array_length(json_extract(readfile('$(settings_file)'), '\$.permissions.allow'));")
+  [ "$allow_len" = "600" ]
+}
+
